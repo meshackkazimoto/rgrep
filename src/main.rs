@@ -1,4 +1,5 @@
-use std::{fs::File, io::{BufRead, BufReader}, path::PathBuf};
+use std::{fs::File, io::{BufRead, BufReader, Write}, path::PathBuf};
+use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use clap::Parser;
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
@@ -24,9 +25,12 @@ struct Args {
     
     #[arg(short = 'l', long)]
     files_with_matches: bool,
+    
+    #[arg(long, default_value = "auto")]
+    color: String,
 }
 
-fn search_in_file(file_path: &PathBuf, pattern: &str, ignore_case: bool, line_numbers: bool, count_only: bool, files_with_matches: bool) -> Result<usize> {
+fn search_in_file(file_path: &PathBuf, pattern: &str, ignore_case: bool, line_numbers: bool, count_only: bool, files_with_matches: bool, color_mode: &str,) -> Result<usize> {
     let file = File::open(file_path).with_context(| | format!("Failed to open file: {}", file_path.display()))?;
     
     let reader = BufReader::new(file);
@@ -38,6 +42,8 @@ fn search_in_file(file_path: &PathBuf, pattern: &str, ignore_case: bool, line_nu
     };
     
     let mut matches = 0usize;
+    let choice = color_choice(color_mode);
+    let mut stdout = StandardStream::stdout(choice);
     
     for (idx, line) in reader.lines().enumerate() {
         let line = line?;
@@ -58,9 +64,24 @@ fn search_in_file(file_path: &PathBuf, pattern: &str, ignore_case: bool, line_nu
                 continue;
             }
             if line_numbers {
-                println!("{}:{}:{}", file_path.display(), idx + 1, line);
+                write!(&mut stdout, "{}:{}:", file_path.display(), idx + 1)?;
             } else {
-                println!("{}:{}", file_path.display(), line);
+                write!(&mut stdout, "{}:", file_path.display())?;
+            }
+
+            if let Some((before, matched, after)) =
+                highlight_first_match(&line, pattern, ignore_case)
+            {
+                write!(&mut stdout, "{before}")?;
+
+                stdout.set_color(ColorSpec::new().set_fg(Some(Color::Red)).set_bold(true))?;
+                write!(&mut stdout, "{matched}")?;
+                stdout.reset()?;
+
+                writeln!(&mut stdout, "{after}")?;
+            } else {
+                // fallback
+                writeln!(&mut stdout, "{line}")?;
             }
         }
     }
@@ -76,13 +97,51 @@ fn search_in_file(file_path: &PathBuf, pattern: &str, ignore_case: bool, line_nu
      Ok(matches)
 }
 
+fn color_choice(mode: &str) -> ColorChoice {
+    match mode {
+        "auto" => ColorChoice::Auto,
+        "always" => ColorChoice::Always,
+        "never" => ColorChoice::Never,
+        _ => ColorChoice::Auto,
+    }
+}
+
+fn highlight_first_match<'a>(line: &'a str, pattern: &str, ignore_case: bool,) -> Option<(String, String, String)> {
+    if pattern.is_empty() {
+        return None;
+    }
+    
+    if ignore_case {
+        let lower_line = line.to_lowercase();
+        let lower_pat = pattern.to_lowercase();
+
+        if let Some(pos) = lower_line.find(&lower_pat) {
+            let start = pos;
+            let end = pos + lower_pat.len();
+            let before = line[..start].to_string();
+            let matched = line[start..end].to_string();
+            let after = line[end..].to_string();
+            return Some((before, matched, after));
+        }
+    } else if let Some(pos) = line.find(pattern) {
+        let start = pos;
+        let end = pos + pattern.len();
+        let before = line[..start].to_string();
+        let matched = line[start..end].to_string();
+        let after = line[end..].to_string();
+        return Some((before, matched, after));
+    }
+    
+    None
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     
     let mut total_matches = 0usize;
     
     let run_on_file = | file_path: PathBuf | -> Result<usize> {
-        search_in_file(&args.path, &args.pattern, args.ignore_case, args.line_numbers, args.count, args.files_with_matches)
+        search_in_file(&args.path, &args.pattern, args.ignore_case, args.line_numbers, args.count, args.files_with_matches, &args.color,)
     };
     
     if args.path.is_file() {
