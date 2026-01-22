@@ -1,0 +1,3 @@
+Hello Rust
+Rust is fast
+Go is also nice
